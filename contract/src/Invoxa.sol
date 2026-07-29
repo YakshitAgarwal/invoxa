@@ -10,34 +10,52 @@ contract Invoxa {
 
     uint256 public nextInvoiceId;
 
+    enum InvoiceStatus {
+        Open,
+        Funded,
+        Repaid,
+        Closed
+    }
+
     struct Invoice {
         uint256 id;
+        address companyOwner;
         uint64 invoiceAmount;
         uint64 dueDate;
         uint64 numberOfInvestors;
-        address[] investors;
         string invoice;
-        bool isActive;
+        InvoiceStatus status;
     }
 
     struct Company {
         address companyOwner;
+        string companyOwnerName;
         string companyName;
         string description;
-        string proofOfId;
-        uint64 foundingYear;
-        Invoice[] invoices;
+        string proofOfIdentity;
+        uint16 foundingYear;
         bool exists;
     }
 
     mapping(address => Company) public companies;
 
+    mapping(uint256 => Invoice) public invoices;
+
+    mapping(address => uint256[]) public companyInvoiceIds;
+
     address[] public companyOwners;
 
-    event CompanyRegistered(address indexed _companyOwner, string companyName);
-    event InvoiceCreated(uint256 indexed invoiceId, address indexed company);
+    event CompanyRegistered(address indexed companyOwner, string companyName);
+
+    event InvoiceCreated(
+        uint256 indexed invoiceId,
+        address indexed companyOwner
+    );
 
     error CompanyAlreadyRegistered();
+    error CompanyNotRegistered();
+    error OutstandingInvoiceExists();
+    error InvalidInvoice();
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -46,37 +64,27 @@ contract Invoxa {
 
     function registerCompany(
         string memory _companyName,
+        string memory _companyOwnerName,
         string memory _description,
-        string memory _proofOfId,
-        uint64 _foundingYear
+        string memory _proofOfIdentity,
+        uint16 _foundingYear
     ) public {
-        if (!companies[msg.sender].exists) {
+        if (companies[msg.sender].exists) {
             revert CompanyAlreadyRegistered();
         }
 
-        require(
-            bytes(_companyName).length > 0,
-            "Company name cannot be an empty string"
-        );
-        require(
-            bytes(_description).length > 0,
-            "Description cannot be an empty string"
-        );
-        require(
-            bytes(_companyName).length > 0,
-            "Proof of ID cannot be an empty string"
-        );
-        require(
-            _foundingYear < block.timestamp,
-            "Founding year cannot be a future year"
-        );
+        require(bytes(_companyName).length > 0, "Invalid company name");
+        require(bytes(_companyOwnerName).length > 0, "Invalid owner name");
+        require(bytes(_description).length > 0, "Invalid description");
+        require(bytes(_proofOfIdentity).length > 0, "Invalid proof");
 
         Company storage company = companies[msg.sender];
 
         company.companyOwner = msg.sender;
+        company.companyOwnerName = _companyOwnerName;
         company.companyName = _companyName;
         company.description = _description;
-        company.proofOfId = _proofOfId;
+        company.proofOfIdentity = _proofOfIdentity;
         company.foundingYear = _foundingYear;
         company.exists = true;
 
@@ -91,43 +99,47 @@ contract Invoxa {
         uint64 _numberOfInvestors,
         string memory _invoice
     ) public {
-        require(companies[msg.sender].exists, "Register company first");
-        require(
-            bytes(_invoice).length > 0,
-            "Invoice cannot be an empty string"
-        );
-        require(
-            _invoiceAmount > 0,
-            "Invoice amount cannot be less than or equal to zero"
-        );
-        require(
-            _numberOfInvestors > 0,
-            "Number of investors cannot be less than or equal to zero"
-        );
-        require(_dueDate > block.timestamp, "Due date has to be a future date");
-
-        Company storage company = companies[msg.sender];
-
-        if (company.invoices.length > 0) {
-            require(
-                !company.invoices[company.invoices.length - 1].isActive,
-                "Outstanding invoice already exists"
-            );
+        if (!companies[msg.sender].exists) {
+            revert CompanyNotRegistered();
         }
 
-        Invoice storage invoice = company.invoices.push();
+        require(bytes(_invoice).length > 0, "Invalid invoice");
+        require(_invoiceAmount > 0, "Invalid amount");
+        require(_numberOfInvestors > 0, "Invalid investor count");
+        require(_dueDate > block.timestamp, "Invalid due date");
 
-        invoice.id = nextInvoiceId++;
-        invoice.invoiceAmount = _invoiceAmount;
-        invoice.dueDate = _dueDate;
-        invoice.numberOfInvestors = _numberOfInvestors;
-        invoice.invoice = _invoice;
-        invoice.isActive = true;
+        // One outstanding invoice at a time
+        uint256[] storage ids = companyInvoiceIds[msg.sender];
 
-        emit InvoiceCreated(invoice.id, msg.sender);
+        if (ids.length > 0) {
+            Invoice storage previousInvoice = invoices[ids[ids.length - 1]];
+
+            if (previousInvoice.status != InvoiceStatus.Closed) {
+                revert OutstandingInvoiceExists();
+            }
+        }
+
+        uint256 invoiceId = nextInvoiceId++;
+
+        Invoice memory invoice = Invoice({
+            id: invoiceId,
+            companyOwner: msg.sender,
+            invoiceAmount: _invoiceAmount,
+            dueDate: _dueDate,
+            numberOfInvestors: _numberOfInvestors,
+            invoice: _invoice,
+            status: InvoiceStatus.Open
+        });
+
+        invoices[invoiceId] = invoice;
+
+        companyInvoiceIds[msg.sender].push(invoiceId);
+
+        emit InvoiceCreated(invoiceId, msg.sender);
     }
 
     function changeOwner(address _owner) public onlyOwner {
+        require(_owner != address(0), "Invalid owner");
         owner = _owner;
     }
 
@@ -136,14 +148,24 @@ contract Invoxa {
     )
         public
         view
-        returns (string memory, string memory, string memory, uint64, bool)
+        returns (
+            string memory,
+            string memory,
+            string memory,
+            string memory,
+            uint16,
+            bool
+        )
     {
+        Company storage company = companies[_companyOwner];
+
         return (
-            companies[_companyOwner].companyName,
-            companies[_companyOwner].description,
-            companies[_companyOwner].proofOfId,
-            companies[_companyOwner].foundingYear,
-            companies[_companyOwner].exists
+            company.companyName,
+            company.companyOwnerName,
+            company.description,
+            company.proofOfIdentity,
+            company.foundingYear,
+            company.exists
         );
     }
 
@@ -151,20 +173,25 @@ contract Invoxa {
         return companyOwners;
     }
 
-    function getCompanyInvoices(
+    function getCompanyInvoiceIds(
         address _companyOwner
-    ) public view returns (Invoice[] memory) {
-        return companies[_companyOwner].invoices;
+    ) public view returns (uint256[] memory) {
+        return companyInvoiceIds[_companyOwner];
+    }
+
+    function getCompanyInvoiceCount(
+        address _companyOwner
+    ) public view returns (uint256) {
+        return companyInvoiceIds[_companyOwner].length;
     }
 
     function getInvoice(
-        address _companyOwner,
-        uint256 _index
+        uint256 _invoiceId
     ) public view returns (Invoice memory) {
-        require(
-            _index < companies[_companyOwner].invoices.length,
-            "Invalid invoice index"
-        );
-        return companies[_companyOwner].invoices[_index];
+        if (_invoiceId >= nextInvoiceId) {
+            revert InvalidInvoice();
+        }
+
+        return invoices[_invoiceId];
     }
 }
