@@ -76,19 +76,25 @@ const HomePage = () => {
             </div>
           </div>
           <div className="flex justify-center items-center gap-12 mt-6">
-            <button className="text-[#d0ffc6] bg-[#003237] py-3 px-6 rounded-full cursor-pointer">
+            <a
+              href="/signup"
+              className="text-[#d0ffc6] bg-[#003237] py-3 px-6 rounded-full cursor-pointer"
+            >
               Get Started
-            </button>
-            <button className="text-[#003237] border-1 border-black bg-white py-3 px-6 rounded-full cursor-pointer">
+            </a>
+            <a
+              href="/about"
+              className="text-[#003237] border-1 border-black bg-white py-3 px-6 rounded-full cursor-pointer"
+            >
               Learn more
-            </button>
+            </a>
           </div>
           <div className="mt-8 flex justify-center items-end gap-10">
-            <div className="rounded-2xl w-70 h-90 bg-white"></div>
-            <div className="rounded-2xl w-50 h-65 bg-[#003237]"></div>
-            <div className="rounded-2xl w-70 h-50 bg-white"></div>
-            <div className="rounded-2xl w-50 h-65 bg-[#d0ffc6]"></div>
-            <div className="rounded-2xl w-70 h-90 bg-[#003237]"></div>
+            <div className="rounded-2xl w-82 h-90 bg-white"></div>
+            <div className="rounded-2xl w-61 h-65 bg-[#003237]"></div>
+            <div className="rounded-2xl w-82 h-50 bg-white"></div>
+            <div className="rounded-2xl w-61 h-65 bg-[#d0ffc6]"></div>
+            <div className="rounded-2xl w-82 h-90 bg-[#003237]"></div>
           </div>
         </div>
       </div>

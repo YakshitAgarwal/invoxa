@@ -46,9 +46,12 @@ const Navbar = () => {
       </div>
 
       <div>
-        <button className="bg-[#003237] text-white py-3 px-6 rounded-full cursor-pointer">
+        <a
+          href="/signup"
+          className="bg-[#003237] text-white py-4 px-6 rounded-full cursor-pointer"
+        >
           Sign Up
-        </button>
+        </a>
       </div>
     </div>
   );

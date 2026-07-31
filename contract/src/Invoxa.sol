@@ -22,7 +22,8 @@ contract Invoxa {
         address companyOwner;
         uint64 invoiceAmount;
         uint64 dueDate;
-        uint64 numberOfInvestors;
+        uint64 totalTokens;
+        uint64 tokensSold;
         string invoice;
         InvoiceStatus status;
     }
@@ -37,11 +38,25 @@ contract Invoxa {
         bool exists;
     }
 
+    struct Investment {
+        uint256 invoiceId;
+        string companyName;
+        uint256 tokensBought;
+        uint256 amountPaid;
+        bool completed;
+    }
+
     mapping(address => Company) public companies;
 
     mapping(uint256 => Invoice) public invoices;
 
     mapping(address => uint256[]) public companyInvoiceIds;
+
+    mapping(address => string) public investors;
+
+    mapping(address => Investment[]) public investorInvestments;
+
+    mapping(uint256 => address[]) public invoiceInvestors;
 
     address[] public companyOwners;
 
@@ -96,7 +111,7 @@ contract Invoxa {
     function createInvoice(
         uint64 _invoiceAmount,
         uint64 _dueDate,
-        uint64 _numberOfInvestors,
+        uint64 _totalTokens,
         string memory _invoice
     ) public {
         if (!companies[msg.sender].exists) {
@@ -105,7 +120,7 @@ contract Invoxa {
 
         require(bytes(_invoice).length > 0, "Invalid invoice");
         require(_invoiceAmount > 0, "Invalid amount");
-        require(_numberOfInvestors > 0, "Invalid investor count");
+        require(_totalTokens > 0, "Invalid token count");
         require(_dueDate > block.timestamp, "Invalid due date");
 
         // One outstanding invoice at a time
@@ -126,7 +141,8 @@ contract Invoxa {
             companyOwner: msg.sender,
             invoiceAmount: _invoiceAmount,
             dueDate: _dueDate,
-            numberOfInvestors: _numberOfInvestors,
+            totalTokens: _totalTokens,
+            tokensSold: 0,
             invoice: _invoice,
             status: InvoiceStatus.Open
         });
@@ -136,6 +152,46 @@ contract Invoxa {
         companyInvoiceIds[msg.sender].push(invoiceId);
 
         emit InvoiceCreated(invoiceId, msg.sender);
+    }
+
+    function registerInvestor(string memory _investorName) public {
+        investors[msg.sender] = _investorName;
+    }
+
+    function buyInvoice(
+        uint256 _invoiceId,
+        uint64 _tokensBought
+    ) public payable {
+        if (_invoiceId >= nextInvoiceId) {
+            revert InvalidInvoice();
+        }
+
+        Invoice storage invoice = invoices[_invoiceId];
+        address companyOwnerAddr = invoice.companyOwner;
+        string memory companyName = companies[companyOwnerAddr].companyName;
+
+        require(invoice.status == InvoiceStatus.Open, "The invoice is closed");
+        require(
+            _tokensBought + invoice.tokensSold <= invoice.totalTokens,
+            "Quantity cannot exceed more than already there"
+        );
+        require(
+            invoice.tokensSold < invoice.totalTokens,
+            "Invoice is sold out"
+        );
+        Investment memory investment = Investment({
+            invoiceId: _invoiceId,
+            companyName: companyName,
+            tokensBought: _tokensBought,
+            amountPaid: _tokensBought *
+                (invoice.invoiceAmount / invoice.totalTokens),
+            completed: false
+        });
+        investorInvestments[msg.sender].push(investment);
+
+        invoiceInvestors[_invoiceId].push(msg.sender);
+
+        invoice.tokensSold += _tokensBought;
     }
 
     function changeOwner(address _owner) public onlyOwner {
@@ -193,5 +249,9 @@ contract Invoxa {
         }
 
         return invoices[_invoiceId];
+    }
+
+    function getMyInvestment() public view returns (Investment[] memory) {
+        return investorInvestments[msg.sender];
     }
 }
