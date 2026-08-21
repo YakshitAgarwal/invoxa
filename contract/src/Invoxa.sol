@@ -4,6 +4,10 @@ pragma solidity ^0.8.24;
 contract Invoxa {
     address public owner;
     uint256 nextInvoiceId;
+    uint256 public constant RETURN_RATE = 150;
+    uint256 public constant PLATFORM_FEE_BPS = 100;
+    uint256 private totalPlatformFees;
+    uint256 private reserveBalance;
 
     constructor() {
         owner = msg.sender;
@@ -26,9 +30,17 @@ contract Invoxa {
 
     enum InvoiceStatus {
         Open,
-        Funded,
+        PartiallyFunded,
+        FullyFunded,
         Repaid,
-        Closed
+        Closed,
+        Expired
+    }
+
+    enum TimeToPayment {
+        Thirty,
+        Sixty,
+        Ninety
     }
 
     struct Company {
@@ -44,11 +56,14 @@ contract Invoxa {
     struct Invoice {
         uint256 id;
         address companyOwner;
-        uint64 amount;
-        uint64 totalTokens;
-        uint64 tokensSold;
-        uint64 dueDate;
+        uint256 amount;
+        uint256 totalTokens;
+        uint256 tokensSold;
         string documentCID;
+        uint256 fundingDeadline;
+        uint256 investorsCount;
+        uint256 investorsClaimed;
+        TimeToPayment timeToPayment;
         InvoiceStatus status;
     }
 
@@ -59,7 +74,7 @@ contract Invoxa {
 
     struct Investment {
         uint256 invoiceId;
-        uint64 tokensOwned;
+        uint256 tokensOwned;
         bool claimed;
     }
 
@@ -75,7 +90,8 @@ contract Invoxa {
 
     mapping(address => Investment[]) public investments;
 
-    mapping(uint256 => mapping(address => uint64)) public invoiceTokenOwnership;
+    mapping(uint256 => mapping(address => uint256))
+        public invoiceTokenOwnership;
 
     function registerCompany(
         string memory _companyName,
@@ -84,6 +100,12 @@ contract Invoxa {
         string memory _proofOfIdentity,
         uint16 _foundingYear
     ) public {
+        require(!companies[msg.sender].exists, "Company already registered");
+        require(bytes(_companyName).length > 0, "Invalid company name");
+        require(bytes(_ownerName).length > 0, "Invalid owner name");
+        require(bytes(_description).length > 0, "Invalid description");
+        require(bytes(_proofOfIdentity).length > 0, "Invalid proof");
+
         Company memory company = Company({
             companyOwner: msg.sender,
             companyName: _companyName,
@@ -100,19 +122,57 @@ contract Invoxa {
     }
 
     function createInvoice(
-        uint64 _amount,
-        uint64 _totalTokens,
-        uint64 _dueDate,
-        string memory _documentCID
+        uint256 _amount,
+        uint256 _totalTokens,
+        string memory _documentCID,
+        uint16 dueIn
     ) public onlyCompanyOwner {
+        TimeToPayment timeToPayment;
+        uint256 fundingPeriod;
+
+        if (dueIn == 30) {
+            timeToPayment = TimeToPayment.Thirty;
+            fundingPeriod = 5 days;
+        } else if (dueIn == 60) {
+            timeToPayment = TimeToPayment.Sixty;
+            fundingPeriod = 10 days;
+        } else if (dueIn == 90) {
+            timeToPayment = TimeToPayment.Ninety;
+            fundingPeriod = 15 days;
+        } else {
+            revert("Invalid Time to Payment");
+        }
+
+        uint256[] storage ids = companyInvoiceIds[msg.sender];
+
+        if (ids.length > 0) {
+            Invoice storage previousInvoice = invoices[ids[ids.length - 1]];
+            require(
+                previousInvoice.status == InvoiceStatus.Closed ||
+                    previousInvoice.status == InvoiceStatus.Expired,
+                "Outstanding invoice exists"
+            );
+        }
+
+        require(_amount > 0, "Invalid amount");
+        require(_totalTokens > 0, "Invalid token count");
+        require(
+            _amount % _totalTokens == 0,
+            "Amount must be divisible by token count"
+        );
+        require(bytes(_documentCID).length > 0, "Invalid document CID");
+
         Invoice memory invoice = Invoice({
             id: nextInvoiceId,
             companyOwner: msg.sender,
             amount: _amount,
             totalTokens: _totalTokens,
             tokensSold: 0,
-            dueDate: _dueDate,
             documentCID: _documentCID,
+            fundingDeadline: block.timestamp + fundingPeriod,
+            investorsCount: 0,
+            investorsClaimed: 0,
+            timeToPayment: timeToPayment,
             status: InvoiceStatus.Open
         });
 
@@ -131,11 +191,11 @@ contract Invoxa {
 
     function buyInvoice(
         uint256 _id,
-        uint64 _tokensBought
+        uint256 _tokensBought
     ) public payable onlyInvestor {
         Invoice storage invoice = invoices[_id];
 
-        require(_id < nextInvoiceId && _id >= 0, "Invalid invoice id");
+        require(_id < nextInvoiceId, "Invalid invoice id");
         require(_tokensBought > 0, "Cannot buy zero tokens");
         require(
             _tokensBought <= invoice.totalTokens - invoice.tokensSold,
@@ -150,8 +210,15 @@ contract Invoxa {
             msg.value == _tokensBought * (invoice.amount / invoice.totalTokens),
             "Incorrect amount of ether sent"
         );
+        require(
+            block.timestamp <= invoice.fundingDeadline,
+            "Funding period has ended"
+        );
 
-        (bool sent, ) = invoice.companyOwner.call{value: msg.value}("");
+        uint256 amountToCompany = (4 * msg.value) / 5;
+        reserveBalance += msg.value / 5;
+
+        (bool sent, ) = invoice.companyOwner.call{value: amountToCompany}("");
         require(sent, "Failed to send ether to company");
 
         invoice.tokensSold += _tokensBought;
@@ -164,16 +231,149 @@ contract Invoxa {
 
         investments[msg.sender].push(investment);
 
-        invoiceTokenOwnership[_id][msg.sender] = _tokensBought;
+        if (invoiceTokenOwnership[_id][msg.sender] == 0) {
+            invoice.investorsCount++;
+        }
+
+        invoiceTokenOwnership[_id][msg.sender] += _tokensBought;
 
         if (invoice.tokensSold == invoice.totalTokens) {
-            invoice.status = InvoiceStatus.Funded;
+            invoice.status = InvoiceStatus.FullyFunded;
         }
     }
 
-    function repayInvoice() public payable onlyCompanyOwner {}
+    function finalizeInvoice(uint256 _invoiceId) public {
+        require(_invoiceId < nextInvoiceId, "Invalid invoice ID");
 
-    function chnageOwner(address _owner) public onlyOwner {
+        Invoice storage invoice = invoices[_invoiceId];
+
+        require(
+            block.timestamp > invoice.fundingDeadline,
+            "Funding period is still active"
+        );
+        require(
+            invoice.status == InvoiceStatus.Open,
+            "Invoice already finalized"
+        );
+
+        if (invoice.tokensSold == 0) {
+            invoice.status = InvoiceStatus.Expired;
+        } else {
+            invoice.status = InvoiceStatus.PartiallyFunded;
+        }
+    }
+
+    function repayInvoice(uint256 invoiceId) public payable onlyCompanyOwner {
+        Invoice storage invoice = invoices[invoiceId];
+
+        require(
+            invoice.status == InvoiceStatus.FullyFunded ||
+                (invoice.status == InvoiceStatus.PartiallyFunded &&
+                    block.timestamp > invoice.fundingDeadline),
+            "Invoice is not ready for repayment"
+        );
+        require(invoice.companyOwner == msg.sender, "Not the invoice owner");
+
+        uint256 fundedAmount = (invoice.tokensSold * invoice.amount) /
+            invoice.totalTokens;
+
+        uint256 companyPrincipal = (80 * fundedAmount) / 100;
+
+        uint256 investorReturn = (fundedAmount *
+            getReturnRate(invoice.timeToPayment)) / 10_000;
+
+        uint256 platformFee = (fundedAmount * PLATFORM_FEE_BPS) / 10_000;
+
+        uint256 amountToBePaid = companyPrincipal +
+            investorReturn +
+            platformFee;
+
+        require(msg.value == amountToBePaid, "Incorrect repayment amount");
+
+        totalPlatformFees += platformFee;
+
+        invoice.status = InvoiceStatus.Repaid;
+    }
+
+    function claimPayment() public onlyInvestor {
+        uint256 totalPayment;
+
+        for (uint256 i = 0; i < investments[msg.sender].length; i++) {
+            Investment storage investment = investments[msg.sender][i];
+
+            if (investment.claimed) {
+                continue;
+            }
+
+            Invoice storage invoice = invoices[investment.invoiceId];
+
+            if (invoice.status != InvoiceStatus.Repaid) {
+                continue;
+            }
+
+            uint256 tokensBought = investment.tokensOwned;
+            uint256 perTokenAmount = invoice.amount / invoice.totalTokens;
+
+            uint256 principal = tokensBought * perTokenAmount;
+            uint256 investorReturn = (principal *
+                getReturnRate(invoice.timeToPayment)) / 10_000;
+
+            uint256 amountReceivable = principal + investorReturn;
+
+            totalPayment += amountReceivable;
+
+            investment.claimed = true;
+
+            invoice.investorsClaimed++;
+
+            if (invoice.investorsCount == invoice.investorsClaimed) {
+                invoice.status = InvoiceStatus.Closed;
+            }
+        }
+
+        require(totalPayment > 0, "Nothing to claim");
+
+        (bool sent, ) = msg.sender.call{value: totalPayment}("");
+        require(sent, "Payment failed");
+    }
+
+    function getReturnRate(
+        TimeToPayment _timeToPayment
+    ) private pure returns (uint256) {
+        uint256 returnRateBps;
+
+        if (_timeToPayment == TimeToPayment.Thirty) {
+            returnRateBps = RETURN_RATE; // 150 = 1.5%
+        } else if (_timeToPayment == TimeToPayment.Sixty) {
+            returnRateBps = RETURN_RATE * 2; // 300 = 3%
+        } else {
+            returnRateBps = RETURN_RATE * 3; // 450 = 4.5%
+        }
+
+        return returnRateBps;
+    }
+
+    function changeOwner(address _owner) public onlyOwner {
+        require(_owner != address(0), "Invalid owner");
         owner = _owner;
+    }
+
+    function viewReserveBalance() public view onlyOwner returns (uint256) {
+        return reserveBalance;
+    }
+
+    function viewTotalPlatformFees() public view onlyOwner returns (uint256) {
+        return totalPlatformFees;
+    }
+
+    function withdrawPlatformFees() public onlyOwner {
+        uint256 amount = totalPlatformFees;
+
+        require(amount > 0, "No platform fees");
+
+        totalPlatformFees = 0;
+
+        (bool sent, ) = owner.call{value: amount}("");
+        require(sent, "Withdrawal failed");
     }
 }
